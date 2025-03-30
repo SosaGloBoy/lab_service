@@ -1,27 +1,60 @@
 package handlers
 
 import (
-	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/gin-gonic/gin"
 	"lab/internal/model"
 	"lab/internal/service"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 type LabHandler struct {
-	LabService *service.LabService
-	Logger     *slog.Logger
+	LabService     *service.LabService
+	TaskServiceURL string // URL для доступа к сервису заданий
+	Logger         *slog.Logger
 }
 
-func NewLabHandler(labService *service.LabService, logger *slog.Logger) *LabHandler {
+// Конструктор для LabHandler
+func NewLabHandler(labService *service.LabService, taskServiceURL string, logger *slog.Logger) *LabHandler {
 	return &LabHandler{
-		LabService: labService,
-		Logger:     logger,
+		LabService:     labService,
+		TaskServiceURL: taskServiceURL,
+		Logger:         logger,
 	}
 }
+
+// Метод для проверки существования задания и получения Docker-образа
+func (h *LabHandler) checkTaskExists(taskID uint) (string, error) {
+	// Запрос к сервису заданий для получения Docker-образа для задания
+	url := fmt.Sprintf("%s/tasks/%d", h.TaskServiceURL, taskID)
+	resp, err := http.Get(url)
+	if err != nil {
+		h.Logger.Error("Error checking task existence", "error", err)
+		return "", fmt.Errorf("error checking task existence: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("task not found")
+	}
+
+	// Извлекаем путь к Docker-образу
+	var response struct {
+		VMImagePath string `json:"vm_image_path"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		h.Logger.Error("Error unmarshaling task response", "error", err)
+		return "", fmt.Errorf("error unmarshaling task response: %w", err)
+	}
+
+	return response.VMImagePath, nil
+}
+
+// Обработчик для создания лаборатории
 func (h *LabHandler) CreateLabHandler(c *gin.Context) {
 	var lab model.Lab
 	if err := c.ShouldBindJSON(&lab); err != nil {
@@ -29,16 +62,33 @@ func (h *LabHandler) CreateLabHandler(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid Lab Data"})
 		return
 	}
+	taskID := lab.TaskID
+	if taskID == 0 {
+		h.Logger.ErrorContext(c, "Task ID is missing", "error", "task_id is required")
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Task ID is required"})
+		return
+	}
+
+	vmImagePath, err := h.checkTaskExists(taskID)
+	if err != nil {
+		h.Logger.ErrorContext(c, "Failed to check task", "error", err)
+		c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
+		return
+	}
+	h.Logger.InfoContext(c, "Path to VM image is", "path", vmImagePath)
+
 	ctx := c.Request.Context()
-	err := h.LabService.CreateLab(ctx, &lab)
+	err = h.LabService.CreateLab(ctx, &lab)
 	if err != nil {
 		h.Logger.ErrorContext(c, "Failed to create lab", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create lab"})
 		return
 	}
-	h.Logger.InfoContext(c, "Lab created", "lab", lab)
-	c.JSON(http.StatusOK, gin.H{"message": "Laboratory created successfully", "lab_id": lab.ID})
+
+	h.Logger.InfoContext(c, "Lab created successfully", "container_id")
+	c.JSON(http.StatusOK, gin.H{"message": "Laboratory created successfully"})
 }
+
 func (h *LabHandler) UpdateLabHandler(c *gin.Context) {
 	var lab model.Lab
 	if err := c.ShouldBindJSON(&lab); err != nil {
@@ -46,6 +96,7 @@ func (h *LabHandler) UpdateLabHandler(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid Lab Data"})
 		return
 	}
+
 	ctx := c.Request.Context()
 	err := h.LabService.UpdateLab(ctx, &lab)
 	if err != nil {
@@ -53,17 +104,21 @@ func (h *LabHandler) UpdateLabHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update lab"})
 		return
 	}
+
 	h.Logger.InfoContext(c, "Lab updated", "lab", lab)
-	c.JSON(http.StatusOK, gin.H{"message": "User updated successfully"})
+	c.JSON(http.StatusOK, gin.H{"message": "Lab updated successfully"})
 }
+
+// Обработчик для удаления лаборатории
 func (h *LabHandler) DeleteLabHandler(c *gin.Context) {
-	labIDparam := c.Param("id")
-	labID, err := strconv.Atoi(labIDparam)
+	labIDParam := c.Param("id")
+	labID, err := strconv.Atoi(labIDParam)
 	if err != nil {
 		h.Logger.ErrorContext(c, "Failed to parse lab id", "error", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid lab id"})
 		return
 	}
+
 	ctx := c.Request.Context()
 	err = h.LabService.DeleteLab(ctx, labID)
 	if err != nil {
@@ -71,77 +126,113 @@ func (h *LabHandler) DeleteLabHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete lab"})
 		return
 	}
-	h.Logger.InfoContext(c, "Lab deleted", "lab", labID)
+
+	h.Logger.InfoContext(c, "Lab deleted", "lab_id", labID)
 	c.JSON(http.StatusOK, gin.H{"message": "Laboratory deleted successfully"})
 }
-func (h *LabHandler) GetLabsHandler(c *gin.Context) {
-	labIDparam := c.Param("id")
-	labID, err := strconv.Atoi(labIDparam)
+
+// Обработчик для получения лаборатории по ID
+func (h *LabHandler) GetLabHandler(c *gin.Context) {
+	labIDParam := c.Param("id")
+	labID, err := strconv.Atoi(labIDParam)
 	if err != nil {
 		h.Logger.ErrorContext(c, "Failed to parse lab id", "error", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid lab id"})
 		return
 	}
+
 	ctx := c.Request.Context()
-	lab, err := h.LabService.GetLab(ctx, labID)
+	lab, err := h.LabService.GetLab(ctx, uint(labID))
 	if err != nil {
 		h.Logger.ErrorContext(c, "Failed to get lab", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get lab"})
 		return
 	}
+
 	h.Logger.InfoContext(c, "Lab found", "lab", lab)
 	c.JSON(http.StatusOK, gin.H{"lab": lab})
 }
+
+// Обработчик для запуска лаборатории (контейнера)
 func (h *LabHandler) StartLabHandler(c *gin.Context) {
-	labIDparam := c.Param("id")
-	labID, err := strconv.Atoi(labIDparam)
+	labIDParam := c.Param("id")
+	labID, err := strconv.Atoi(labIDParam)
 	if err != nil {
 		h.Logger.ErrorContext(c, "Failed to parse lab id", "error", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid lab id"})
-	}
-	containerID, err := h.LabService.StartLab(context.Background(), labID)
-	if err != nil {
-		h.Logger.ErrorContext(c, "Failed to start lab", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start lab"})
-		return
-	}
-	h.Logger.InfoContext(c, "Lab started successfully", "containerID", containerID)
-	c.JSON(http.StatusOK, gin.H{"message": "Laboratory started successfully"})
-}
-func (h *LabHandler) StopLabHandler(c *gin.Context) {
-	labID, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid lab ID"})
 		return
 	}
 
-	err = h.LabService.StopLab(context.Background(), labID)
+	// Получаем Docker-образ через API
+	vmImagePath, err := h.checkTaskExists(uint(labID))
 	if err != nil {
-		h.Logger.ErrorContext(context.Background(), "Error stopping lab", "error", err)
+		h.Logger.ErrorContext(c, "Failed to get task Docker image", "error", err)
+		c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	containerID, err := h.LabService.StartLab(ctx, &model.Lab{ID: uint(labID)}, vmImagePath)
+	if err != nil {
+		h.Logger.ErrorContext(c, "Failed to start container", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start container"})
+		return
+	}
+
+	h.Logger.InfoContext(c, "Lab started successfully", "container_id", containerID)
+	c.JSON(http.StatusOK, gin.H{"message": "Laboratory started successfully", "container_id": containerID})
+}
+
+// Обработчик для остановки лаборатории
+func (h *LabHandler) StopLabHandler(c *gin.Context) {
+	labIDParam := c.Param("id")
+	labID, err := strconv.Atoi(labIDParam)
+	if err != nil {
+		h.Logger.ErrorContext(c, "Failed to parse lab id", "error", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid lab id"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	err = h.LabService.StopLab(ctx, labID)
+	if err != nil {
+		h.Logger.ErrorContext(c, "Error stopping lab", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not stop lab"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Lab stopped"})
 }
-func (h *LabHandler) ExecuteCommand(c *gin.Context) {
-	labID, err := strconv.Atoi(c.Param("id"))
+
+func (h *LabHandler) ExecuteCommandHandler(c *gin.Context) {
+	labIDParam := c.Param("id")
+	labID, err := strconv.Atoi(labIDParam)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid lab ID"})
+		h.Logger.ErrorContext(c, "Failed to parse lab id", "error", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid lab id"})
 		return
 	}
 
 	var request struct {
 		Command string `json:"command"`
 	}
-	if err := json.NewDecoder(c.Request.Body).Decode(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+
+	// Разбираем команду
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid command"})
 		return
 	}
 
-	output, err := h.LabService.ExecuteCommand(context.Background(), labID, []string{"/bin/sh", "-c", request.Command})
+	// Разделяем команду на части, чтобы передать в срезе строк
+	commandArgs := strings.Fields(request.Command)
+
+	// Формируем контейнер ID
+	containerID := fmt.Sprintf("lab_%d", labID)
+
+	// Выполнение команды в контейнере
+	output, err := h.LabService.ExecuteCommand(c.Request.Context(), containerID, commandArgs)
 	if err != nil {
-		h.Logger.ErrorContext(context.Background(), "Error executing command", "error", err)
+		h.Logger.ErrorContext(c, "Error executing command", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not execute command"})
 		return
 	}

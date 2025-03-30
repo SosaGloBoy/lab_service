@@ -25,6 +25,6 @@ func SetupRoutes(router *gin.Engine, labHandler *handlers.LabHandler) {
 		labGroup.POST("/:id/stop", labHandler.StopLabHandler)
 
 		// Выполнение команды в лаборатории
-		labGroup.POST("/:id/execute-command", labHandler.ExecuteCommand)
+		labGroup.POST("/:id/execute-command", labHandler.ExecuteCommandHandler)
 	}
 }

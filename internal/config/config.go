@@ -10,22 +10,26 @@ import (
 )
 
 type Config struct {
-	DBUser     string
-	DBPassword string
-	DBName     string
-	DBHost     string
-	DBPort     string
-	JWTSecret  string
+	DBUser         string
+	DBPassword     string
+	DBName         string
+	DBHost         string
+	DBPort         string
+	JWTSecret      string
+	TaskServiceURL string
+	ServerPort     string
 }
 
 func LoadConfig() Config {
 	return Config{
-		DBUser:     getEnv("DB_USER", "user"),
-		DBPassword: getEnv("DB_PASSWORD", "password"),
-		DBName:     getEnv("DB_NAME", "lab_db"),
-		DBHost:     getEnv("DB_HOST", "localhost"),
-		DBPort:     getEnv("DB_PORT", "5432"), // Обычно 5432, убедись, что 5433 нужен
-		JWTSecret:  getEnv("JWT_SECRET", "my_secret_key"),
+		DBUser:         getEnv("DB_USER", "user"),
+		DBPassword:     getEnv("DB_PASSWORD", "password"),
+		DBName:         getEnv("DB_NAME", "lab_db"),
+		DBHost:         getEnv("DB_HOST", "localhost"),
+		DBPort:         getEnv("DB_PORT", "5434"),
+		JWTSecret:      getEnv("JWT_SECRET", "my_secret_key"),
+		TaskServiceURL: getEnv("TASK_SERVICE_URL", "http://localhost:8086"),
+		ServerPort:     getEnv("SERVER_PORT", ":8082"),
 	}
 }
 
@@ -40,7 +44,6 @@ func InitDB(cfg Config) (*gorm.DB, error) {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
-	// Автоматическая миграция
 	if err = db.AutoMigrate(&model.Lab{}); err != nil {
 		return nil, fmt.Errorf("failed to migrate database: %w", err)
 	}
