@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os/exec"
+	"strings"
 )
 
 type LabService struct {
@@ -33,16 +34,21 @@ func (s *LabService) CreateLab(ctx context.Context, lab *model.Lab) error {
 		s.Logger.ErrorContext(ctx, "Failed to get task Docker image", "error", err)
 		return err
 	}
-
-	// Запуск контейнера для задания
-	containerID, err := s.StartLab(ctx, lab, vmImagePath)
-	if err != nil {
-		s.Logger.ErrorContext(ctx, "Error starting container", "error", err)
-		return err
+	if lab.ID == 0 {
+		lab.ID = 1
 	}
+	containerName := fmt.Sprintf("lab_%d", lab.ID)
+
+	cmd := exec.Command("docker", "run", "-dit", "--name", containerName, vmImagePath)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		s.Logger.ErrorContext(ctx, "Error while creating container", "error", err)
+		return fmt.Errorf("error while creating container %s: %s", containerName, err)
+	}
+	containerID := string(output) // Преобразуем вывод в строку
 
 	lab.ContainerID = containerID
-	// Сохраняем лабораторию в базу данных
 	return s.LabRepository.CreateLab(ctx, lab)
 }
 
@@ -83,8 +89,11 @@ func (s *LabService) getTaskDockerImage(taskID uint) (string, error) {
 
 // Метод для запуска контейнера
 func (s *LabService) StartLab(ctx context.Context, lab *model.Lab, vmImagePath string) (string, error) {
+	if lab.ID == 0 {
+		lab.ID = 1
+	}
 	containerName := fmt.Sprintf("lab_%d", lab.ID)
-	cmd := exec.Command("docker", "run", "-dit", "--name", containerName, vmImagePath)
+	cmd := exec.Command("docker", "start", containerName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		s.Logger.ErrorContext(ctx, "Error while starting container", "error", err)
@@ -103,21 +112,14 @@ func (s *LabService) StopLab(ctx context.Context, labID int) error {
 		return err
 	}
 
-	cmd := exec.Command("docker", "stop", lab.ContainerID)
+	cmd := exec.Command("docker", "stop", strings.TrimSpace(lab.ContainerID))
 	_, err = cmd.CombinedOutput()
 	if err != nil {
 		s.Logger.ErrorContext(ctx, "Error while stopping container", "error", err)
 		return fmt.Errorf("error while stopping container %s: %s", lab.ContainerID, err)
 	}
 
-	cmd = exec.Command("docker", "rm", lab.ContainerID)
-	_, err = cmd.CombinedOutput()
-	if err != nil {
-		s.Logger.ErrorContext(ctx, "Error while removing container", "error", err)
-		return fmt.Errorf("error while removing container %s: %s", lab.ContainerID, err)
-	}
-
-	s.Logger.InfoContext(ctx, "Lab stopped and container removed successfully", "lab_id", lab.ID)
+	s.Logger.InfoContext(ctx, "Lab stopped successfully", "lab_id", lab.ID)
 	return nil
 }
 
@@ -167,14 +169,14 @@ func (s *LabService) DeleteLab(ctx context.Context, labID int) error {
 	}
 
 	// Останавливаем и удаляем контейнер, связанный с лабораторией
-	cmdStop := exec.Command("docker", "stop", lab.ContainerID)
+	cmdStop := exec.Command("docker", "stop", strings.TrimSpace(lab.ContainerID))
 	_, err = cmdStop.CombinedOutput()
 	if err != nil {
 		s.Logger.ErrorContext(ctx, "Error while stopping container", "error", err, "container_id", lab.ContainerID)
 		return fmt.Errorf("error while stopping container %s: %s", lab.ContainerID, err)
 	}
 
-	cmdRemove := exec.Command("docker", "rm", lab.ContainerID)
+	cmdRemove := exec.Command("docker", "rm", strings.TrimSpace(lab.ContainerID))
 	_, err = cmdRemove.CombinedOutput()
 	if err != nil {
 		s.Logger.ErrorContext(ctx, "Error while removing container", "error", err, "container_id", lab.ContainerID)

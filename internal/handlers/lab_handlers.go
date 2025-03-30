@@ -44,17 +44,18 @@ func (h *LabHandler) checkTaskExists(taskID uint) (string, error) {
 
 	// Извлекаем путь к Docker-образу
 	var response struct {
-		VMImagePath string `json:"vm_image_path"`
+		Task struct {
+			VMImagePath string `json:"vm_image_path"`
+		} `json:"task"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
 		h.Logger.Error("Error unmarshaling task response", "error", err)
 		return "", fmt.Errorf("error unmarshaling task response: %w", err)
 	}
 
-	return response.VMImagePath, nil
+	return response.Task.VMImagePath, nil
 }
 
-// Обработчик для создания лаборатории
 func (h *LabHandler) CreateLabHandler(c *gin.Context) {
 	var lab model.Lab
 	if err := c.ShouldBindJSON(&lab); err != nil {
@@ -223,13 +224,10 @@ func (h *LabHandler) ExecuteCommandHandler(c *gin.Context) {
 		return
 	}
 
-	// Разделяем команду на части, чтобы передать в срезе строк
 	commandArgs := strings.Fields(request.Command)
 
-	// Формируем контейнер ID
 	containerID := fmt.Sprintf("lab_%d", labID)
 
-	// Выполнение команды в контейнере
 	output, err := h.LabService.ExecuteCommand(c.Request.Context(), containerID, commandArgs)
 	if err != nil {
 		h.Logger.ErrorContext(c, "Error executing command", "error", err)
