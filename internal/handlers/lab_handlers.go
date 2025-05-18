@@ -57,39 +57,43 @@ func (h *LabHandler) checkTaskExists(taskID uint) (string, error) {
 }
 
 func (h *LabHandler) CreateLabHandler(c *gin.Context) {
-	var lab model.Lab
-	if err := c.ShouldBindJSON(&lab); err != nil {
-		h.Logger.ErrorContext(c, "Failed to bind lab data", "error", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid Lab Data"})
+	if c.Request.ContentLength == 0 {
+		h.Logger.ErrorContext(c, "Empty request body")
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Request body is empty"})
 		return
 	}
-	taskID := lab.TaskID
-	if taskID == 0 {
-		h.Logger.ErrorContext(c, "Task ID is missing", "error", "task_id is required")
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Task ID is required"})
-		return
+	var request struct {
+		TaskID      uint   `json:"task_id" binding:"required"`
+		VMImagePath string `json:"vm_image_path" binding:"required"`
 	}
 
-	vmImagePath, err := h.checkTaskExists(taskID)
-	if err != nil {
-		h.Logger.ErrorContext(c, "Failed to check task", "error", err)
-		c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
+	if err := c.ShouldBindJSON(&request); err != nil {
+		h.Logger.ErrorContext(c, "Failed to bind request data", "error", err)
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid JSON: expected {task_id: number, vm_image_path: string}",
+		})
 		return
 	}
-	h.Logger.InfoContext(c, "Path to VM image is", "path", vmImagePath)
-
+	h.Logger.InfoContext(c, "Creating lab",
+		"task_id", request.TaskID,
+		"vm_image_path", request.VMImagePath,
+	)
 	ctx := c.Request.Context()
-	err = h.LabService.CreateLab(ctx, &lab)
+	containerID, accessURL, labID, err := h.LabService.CreateLab(ctx, request.TaskID, request.VMImagePath)
 	if err != nil {
 		h.Logger.ErrorContext(c, "Failed to create lab", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create lab"})
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to start lab container",
+			"details": err.Error(), // Можно убрать в production
+		})
 		return
 	}
-
-	h.Logger.InfoContext(c, "Lab created successfully", "container_id")
-	c.JSON(http.StatusOK, gin.H{"message": "Laboratory created successfully"})
+	c.JSON(http.StatusOK, gin.H{
+		"container_id": containerID,
+		"access_url":   accessURL,
+		"lab_id":       labID,
+	})
 }
-
 func (h *LabHandler) UpdateLabHandler(c *gin.Context) {
 	var lab model.Lab
 	if err := c.ShouldBindJSON(&lab); err != nil {
@@ -206,6 +210,29 @@ func (h *LabHandler) StopLabHandler(c *gin.Context) {
 }
 
 func (h *LabHandler) ExecuteCommandHandler(c *gin.Context) {
+	var request struct {
+		ContainerID string `json:"container_id"`
+		Command     string `json:"command"`
+	}
+
+	if err := c.ShouldBindJSON(&request); err != nil {
+		h.Logger.ErrorContext(c, "Invalid request body", "error", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	if request.ContainerID == "" || request.Command == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "container_id and command are required"})
+		return
+	}
+
+	commandArgs := strings.Fields(request.Command)
+
+	output, _ := h.LabService.ExecuteCommand(c.Request.Context(), request.ContainerID, commandArgs)
+
+	c.JSON(http.StatusOK, gin.H{"output": strings.TrimSpace(output)})
+}
+func (h *LabHandler) CommitLabHandler(c *gin.Context) {
 	labIDParam := c.Param("id")
 	labID, err := strconv.Atoi(labIDParam)
 	if err != nil {
@@ -214,26 +241,60 @@ func (h *LabHandler) ExecuteCommandHandler(c *gin.Context) {
 		return
 	}
 
-	var request struct {
-		Command string `json:"command"`
-	}
-
-	// Разбираем команду
-	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid command"})
-		return
-	}
-
-	commandArgs := strings.Fields(request.Command)
-
-	containerID := fmt.Sprintf("lab_%d", labID)
-
-	output, err := h.LabService.ExecuteCommand(c.Request.Context(), containerID, commandArgs)
+	ctx := c.Request.Context()
+	lab, err := h.LabService.GetLab(ctx, uint(labID))
 	if err != nil {
-		h.Logger.ErrorContext(c, "Error executing command", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not execute command"})
+		h.Logger.ErrorContext(c, "Error getting lab info", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not get lab info"})
+		return
+	}
+	if lab.ContainerName == "" {
+		h.Logger.ErrorContext(c, "Lab has no container", "lab_id", labID)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Lab has no associated container"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"output": output})
+	imageName, err := h.LabService.CommitLab(ctx, lab.ContainerName)
+	if err != nil {
+		h.Logger.ErrorContext(c, "Error committing container",
+			"error", err,
+			"container", lab.ContainerName)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not commit container"})
+		return
+	}
+	lab.CommitImage = imageName
+
+	h.Logger.InfoContext(c, "Container committed successfully",
+		"lab_id", labID,
+		"container", lab.ContainerName,
+		"image_name", imageName)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":    "Container committed successfully",
+		"image_name": imageName,
+	})
+}
+func (h *LabHandler) DeleteCommitLabHandler(c *gin.Context) {
+	labIDParam := c.Param("id")
+	labID, err := strconv.Atoi(labIDParam)
+	if err != nil {
+		h.Logger.ErrorContext(c, "Failed to parse lab id", "error", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid lab id"})
+		return
+	}
+	ctx := c.Request.Context()
+	lab, err := h.LabService.GetLab(ctx, uint(labID))
+	if err != nil {
+		h.Logger.ErrorContext(c, "Error getting lab info", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not get lab info"})
+		return
+	}
+	err = h.LabService.DeleteContainerCommits(ctx, lab.ContainerName)
+	if err != nil {
+		h.Logger.ErrorContext(c, "Error deleting container", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not delete container"})
+		return
+	}
+	h.Logger.InfoContext(c, "Container deleted successfully")
+	c.JSON(http.StatusOK, gin.H{"message": "Container deleted"})
 }

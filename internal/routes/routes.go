@@ -16,7 +16,7 @@ func SetupRoutes(router *gin.Engine, labHandler *handlers.LabHandler) {
 		labGroup.PUT("/:id", labHandler.UpdateLabHandler)
 
 		// Удаление лаборатории
-		labGroup.DELETE("/:id", labHandler.DeleteLabHandler)
+		labGroup.POST("/:id/delete", labHandler.DeleteLabHandler)
 
 		// Запуск лаборатории
 		labGroup.POST("/:id/start", labHandler.StartLabHandler)
@@ -28,5 +28,9 @@ func SetupRoutes(router *gin.Engine, labHandler *handlers.LabHandler) {
 		labGroup.POST("/:id/execute-command", labHandler.ExecuteCommandHandler)
 
 		labGroup.GET("/:id", labHandler.GetLabHandler)
+
+		labGroup.POST("/:id/commit", labHandler.CommitLabHandler)
+
+		labGroup.POST("/:id/deleteCommits", labHandler.DeleteCommitLabHandler)
 	}
 }
